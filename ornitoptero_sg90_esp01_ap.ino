@@ -1,24 +1,26 @@
+#include <WebServer.h>
+#include <WiFiManager.h>
+#include <Deneyap_Servo.h>
+#include <math.h>
 
+// Definir los servos
+Servo servoIzquierda;
+Servo servoDerecha;
 
-//codigo con velocidad en slider y ap point esp12e
-#include <ESP8266WiFi.h>
-#include <ESP8266WebServer.h>
-#include <Servo.h>
-
-Servo Dservo;  // Servo derecho
-Servo Iservo;  // Servo izquierdo
-
-// Variables
-unsigned long previousMillis = 0;
-const long interval = 100;
-int sliderValue = 0; // Velocidad
+// Variables para almacenar el estado actual del control deslizante, joystick y el interruptor
+int sliderValue = 0;
 int joystickXValue = 0;
 int joystickYValue = 0;
-int deadZone = 40; // Zona muerta para el joystick
+int rawX = 0;
+int rawY = 0;
+bool switchValue = false;
+int zona_muerta = 50; // Definir el tamaño de la zona muerta
 
-// Crear instancia del servidor web
-ESP8266WebServer server(80);
+WebServer server(80);  // Crear un objeto de servidor web que escucha solicitudes HTTP en el puerto 80
 
+// Pines a los que están conectados los servos
+const int pinServoIzquierda = 0;
+const int pinServoDerecha = 2;
 
 // Ángulos de movimiento
 int anguloMin = 95;
@@ -27,65 +29,87 @@ int anguloCentro = 130;
 
 // Variables para la frecuencia y amplitud
 float frecuencia = 1.0; // Frecuencia base
-float amplitudIzquierda = 2.0; // Amplitud base para el ala izquierda
-float amplitudDerecha = 2.0;   // Amplitud base para el ala derecha
-
+float amplitudIzquierda = 1.0; // Amplitud base para el ala izquierda
+float amplitudDerecha = 1.0;   // Amplitud base para el ala derecha
 
 
 void setup() {
   Serial.begin(115200);
 
-  // Configurar modo Access Point
-  WiFi.softAP("1flapping", "12345678"); // Nombre y contraseña del AP
-  Serial.println("Access Point iniciado");
-  Serial.print("IP: ");
-  Serial.println(WiFi.softAPIP());
+  // Configuración de WiFiManager
+  WiFiManager wifiManager;
+  wifiManager.autoConnect("AutoConnectAP");
 
-  // Configurar los servos
-  Dservo.attach(0);  // Servo derecho en pin 12
-  Iservo.attach(2);  // Servo izquierdo en pin 13
+  Serial.println("");
+
+  // Esperar a que el Wi-Fi se conecte
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+
+  // Adjuntar los servos a los pines correspondientes
+  servoIzquierda.attach(pinServoIzquierda);
+  servoDerecha.attach(pinServoDerecha,1);
 
   // Inicializar los servos en la posición central
-  Dservo.write(anguloCentro);
-  Iservo.write(anguloCentro);
+  servoIzquierda.write(anguloCentro);
+  servoDerecha.write(anguloCentro);
 
-  // Rutas del servidor
-  server.on("/", handleRoot);
-  server.on("/slider", handleSlider);
-  server.on("/joystick", HTTP_GET, handleJoystick);
+  Serial.print("IP address: ");
+  Serial.println(WiFi.localIP());  // Imprimir la IP en el monitor serial
 
-  // Iniciar servidor
-  server.begin();
-  Serial.println("Servidor HTTP iniciado");
+  server.on("/", handleRoot);  // Llamar a la función 'handleRoot' cuando un cliente solicita la URI "/"
+  server.on("/slider", handleSlider);  // Llamar a la función 'handleSlider' cuando un cliente solicita la URI "/slider"
+  server.on("/joystick", HTTP_GET, handleJoystick);  // Llamar a la función 'handleJoystick' cuando un cliente solicita la URI "/joystick"
+  server.on("/switch", handleSwitch);  // Llamar a la función 'handleSwitch' cuando un cliente solicita la URI "/switch"
+
+  server.begin();  // Iniciar el servidor
+  Serial.println("HTTP server started");
 }
 
 void loop() {
-  // Aplicar zona muerta al joystick
-  int valueX = joystickXValue;
-  int valueY = joystickYValue;
-  if (abs(valueX) < deadZone) valueX = 0;
-  if (abs(valueY) < deadZone) valueY = 0;
+  // Leer los valores del joystick
+  int valor_x = rawX;
+  int valor_y = rawY;
 
-  // Controlar dirección y velocidad de los servos
-  if (valueY > 0) {          // Hacia adelante
-    forward();
-  } else if (valueY < 0) {   // Hacia atrás
-    reverse();
-  } else if (valueX > 0) {   // Girar a la derecha
-    right();
-  } else if (valueX < 0) {   // Girar a la izquierda
-    left();
-  } else {                   // Detenerse
-    stopMotors();
+  // Aplicar la zona muerta
+  if (abs(valor_x) < zona_muerta) valor_x = 0;
+  if (abs(valor_y) < zona_muerta) valor_y = 0;
+
+  // Controlar la dirección del ornitóptero
+  if (valor_y < 0) {
+    adelante();
+  }
+  else if (valor_x > 0) {
+    derecha();
+  }
+  else if (valor_x < 0) {
+    izquierda();
+  }
+  else if (valor_x == 0 && valor_y == 0) {
+    parar();
   }
 
-  // Manejar solicitudes del servidor
-  server.handleClient();
+  server.handleClient();  // Manejar una nueva solicitud del cliente
 
-   moverAlas();
+
+    moverAlas();
 }
 
-// Ruta principal
+void moverAlas() {
+    static unsigned long startTime = millis(); // Tiempo de inicio
+
+  float elapsedTime = (millis() - startTime) / 1000.0; // Tiempo transcurrido en segundos
+
+  // Movimiento sinusoidal para un período de 1 segundo
+  float angleIzquierda = anguloCentro + (anguloMax - anguloCentro) * sin(2 * PI * frecuencia * elapsedTime) * amplitudIzquierda; 
+  float angleDerecha = anguloCentro + (anguloMax - anguloCentro) * sin(2 * PI * frecuencia * elapsedTime + PI) * amplitudDerecha;
+
+  servoIzquierda.write(angleIzquierda);
+  servoDerecha.write(angleDerecha);
+}
+
 void handleRoot() {
   String html = "<!DOCTYPE html><html><head><style>body { display: flex; justify-content: center; align-items: center; height: 100vh; flex-direction: column; }</style><script>";
   html += "function updateJoystick(event) {";
@@ -101,67 +125,54 @@ void handleRoot() {
   html += "  var newY = radius + distance * Math.sin(angle);";
   html += "  joystickDot.style.left = newX + 'px';";
   html += "  joystickDot.style.top = newY + 'px';";
-  html += "  var normalizedX = ((newX - radius) / radius * 100).toFixed(0);";
-  html += "  var normalizedY = ((newY - radius) / radius * 100).toFixed(0);";
+  html += "  var normalizedX = (newX - radius) / radius * 100;";
+  html += "  var normalizedY = (newY - radius) / radius * 100;";
   html += "  fetch('/joystick?x=' + normalizedX + '&y=' + normalizedY);";
   html += "}";
   html += "</script></head><body>";
-  html += "<h2>aero robot</h2>";
-  html += "<p>Velocidad: <input type='range' id='slider' name='slider' min='0' max='180' onchange='fetch(\"/slider?value=\" + this.value)'></p>";
-  html += "<div id='joystick' style='width: 200px; height: 200px; background-color: #f0f0f0; border-radius: 50%; position: relative;' onmousemove='updateJoystick(event)'>";
-  html += "  <div id='joystickDot' style='width: 20px; height: 20px; background-color: #5B196A; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);'></div>";
+  html += "<h2>ESP32 C3 Controller</h2>";
+  html += "<p>Slider: <input type='range' id='slider' name='slider' min='0' max='255' onchange='fetch(\"/slider?value=\" + this.value)'></p>";
+  html += "<div class='joystick' id='joystick' style='width: 200px; height: 200px; background-color: #f0f0f0; border-radius: 50%; position: relative;' onmousemove='updateJoystick(event)'>";
+  html += "  <div id='joystickDot' style='width: 20px; height: 20px; background-color: #5B196A; border-radius: 50%; position: absolute; top: " + String(joystickYValue) + "%; left: " + String(joystickXValue) + "%; transform: translate(-50%, -50%);'></div>";
   html += "</div>";
+  html += "<p>Switch: <input type='checkbox' id='switch' name='switch' onchange='fetch(\"/switch?value=\" + (this.checked ? 1 : 0))'></p>";
   html += "</body></html>";
   server.send(200, "text/html", html);
 }
 
-void moverAlas() {
-    static unsigned long startTime = millis(); // Tiempo de inicio
-
-  float elapsedTime = (millis() - startTime) / 1000.0; // Tiempo transcurrido en segundos
-
-  // Movimiento sinusoidal para un período de 1 segundo
-  float angleIzquierda = anguloCentro + (anguloMax - anguloCentro) * sin(2 * PI * frecuencia * elapsedTime) * amplitudIzquierda; 
-  float angleDerecha = anguloCentro + (anguloMax - anguloCentro) * sin(2 * PI * frecuencia * elapsedTime + PI) * amplitudDerecha;
-
-  Dservo.write(angleIzquierda);
-  Iservo.write(angleDerecha);
-}
-
-// Manejar deslizador
 void handleSlider() {
-  sliderValue = server.arg("value").toInt();
-  server.send(200, "text/plain", "Valor de velocidad actualizado");
+  sliderValue = server.arg("value").toInt();  // Obtener el valor del control deslizante
+  frecuencia = 3.0 + (sliderValue / 255.0) * (6.0 - 3.0); // Mapear el valor del slider a la frecuencia
+  server.send(200, "text/plain", "Slider value updated");  // Enviar una respuesta al cliente
 }
 
-// Manejar joystick
 void handleJoystick() {
-  joystickXValue = server.arg("x").toInt();
-  joystickYValue = server.arg("y").toInt();
-  server.send(200, "text/plain", "Valores del joystick actualizados");
+  rawX = server.arg("x").toInt();  // Obtener el valor X del joystick
+  rawY = server.arg("y").toInt();  // Obtener el valor Y del joystick
+  server.send(200, "text/plain", "Joystick value updated");  // Enviar una respuesta al cliente
 }
 
-// Funciones de control de motores
-void forward() {
+void handleSwitch() {
+  switchValue = server.arg("value").toInt() == 1;  // Obtener el valor del interruptor
+  server.send(200, "text/plain", "Switch value updated");  // Enviar una respuesta al cliente
+}
+
+void adelante() {
   amplitudIzquierda = 1.0;   // Amplitud base para vuelo recto
   amplitudDerecha = 1.0;     // Amplitud base para vuelo recto
 }
 
-void reverse() {
-
-}
-
-void right() {
+void derecha() {
   amplitudIzquierda = 1.0;   // Mantener amplitud para el ala izquierda
   amplitudDerecha = 0.6;     // Reducir amplitud para el ala derecha
 }
 
-void left() {
+void izquierda() {
   amplitudIzquierda = 0.6;   // Reducir amplitud para el ala izquierda
   amplitudDerecha = 1.0;     // Mantener amplitud para el ala derecha
 }
 
-void stopMotors() {
+void parar() {
   amplitudIzquierda = 0;   // Detener el aleteo del ala izquierda
   amplitudDerecha = 0;     // Detener el aleteo del ala derecha
 }
